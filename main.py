@@ -1,7 +1,8 @@
 import hashlib
 import random
 import threading
-import coloredlogs, logging
+import coloredlogs
+import logging
 from queue import Queue
 
 nr_threads = 10
@@ -11,6 +12,8 @@ difficulty = 4
 genesis= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 genesis = genesis[:-difficulty] + "0" * difficulty
 
+
+# TODO: Use https://github.com/Tierion/pymerkletools ? Has pure data implement?
 
 def hasher(content):
         return hashlib.sha256(content.encode()).hexdigest()
