@@ -5,7 +5,7 @@ import coloredlogs, logging
 from queue import Queue
 
 nr_threads = 10
-max_randint = 100000000000
+max_randint = 10000000000
 nonce_max_jump = 1000
 difficulty = 4
 genesis= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
