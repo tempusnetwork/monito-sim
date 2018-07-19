@@ -44,17 +44,13 @@ def xstr(s):
     return '' if s is None else str(s)
 
 
-# TODO: Replace with int on full hex string, not just individual characters
 def similar(a, b):
-    totsum = 0
-    for i in range(64):
-        totsum += abs(int(a[i], 16)-int(b[i], 16))
+    diff = abs(int(a, 16) - int(b, 16))
 
-    maxpos = 15*64
-    frac = totsum/maxpos
-    sim = 1-frac
+    maxpos = int(pow(16, 64)) - 1
+    frac = diff/maxpos
 
-    return sim
+    return frac
 
 
 def mine(content=None):
@@ -88,7 +84,8 @@ def verifier(i, ranked_list):
                 similarity_list = [similar(peers_pubkey, current_block) for
                                    peers_pubkey, _ in top_peers]
 
-                score = similar(my_pubkey, current_block)
+                score = similarity_list[i]
+
                 logger.info(
                     "I am " + str(my_pubkey) + " my score is " + str(score))
 
@@ -96,6 +93,7 @@ def verifier(i, ranked_list):
                                  key=lambda k: similarity_list[k],
                                  reverse=True)
 
+                # Get peers ranked in descending order of score
                 peer_whos_turn_it_is, _ = top_peers[indices[0]]
                 if my_pubkey == peer_whos_turn_it_is:
                     logger.debug("My turn! Putting...")
@@ -105,10 +103,10 @@ def verifier(i, ranked_list):
                     # the end to win every time.....
                     new_hash = hasher(new_hash)
 
+                    time.sleep(5)  # Simulate some extra difficulty..
                     logger.critical("Put " + new_hash)
                     chain.put(new_hash)
 
-                time.sleep(5)  # Simulate some extra difficulty..
                 wait_for_new_tick = True
 
     else:
