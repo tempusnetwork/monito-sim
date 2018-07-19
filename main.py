@@ -44,6 +44,7 @@ def xstr(s):
     return '' if s is None else str(s)
 
 
+# TODO: Replace with int on full hex string, not just individual characters
 def similar(a, b):
     totsum = 0
     for i in range(64):
