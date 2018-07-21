@@ -30,7 +30,7 @@ levels_list = levels_list[:nr_threads]
 
 max_randint = 10000000000
 nonce_max_jump = 1000
-difficulty = 2
+difficulty = 3
 genesis = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 genesis = genesis[:-difficulty] + "0" * difficulty
 
@@ -45,12 +45,15 @@ def xstr(s):
 
 
 def similar(a, b):
-    diff = abs(int(a, 16) - int(b, 16))
+    a_to_int = int(a, 16)
+    b_to_int = int(b, 16)
+    diff = abs(a_to_int - b_to_int)
 
-    maxpos = int(pow(16, 64)) - 1
-    frac = diff/maxpos
+    max_possible = int(pow(16, 64)) - 1
 
-    return frac
+    fraction = diff/max_possible
+
+    return fraction, a_to_int/max_possible, b_to_int/max_possible
 
 
 def mine(content=None):
@@ -81,30 +84,34 @@ def verifier(i, ranked_list):
 
             else:
                 top_peers = ranked_list[:top_level_peers]
-                similarity_list = [similar(peers_pubkey, current_block) for
-                                   peers_pubkey, _ in top_peers]
 
-                score = similarity_list[i]
+                # Used to use | hash(pubk) - hash(ref) |, but this gave too low
+                # randomness. so now using | hash(pubk+ref) - hash(ref) |
+                similarity_list = \
+                    [similar(hasher(peers_pubkey+current_block), current_block)
+                     for peers_pubkey, _ in top_peers]
+
+                score, pubk_score, block_score = similarity_list[i]
 
                 logger.info(
-                    "I am " + str(my_pubkey) + " my score is " + str(score))
+                    "I am " + str(my_pubkey) + " my score is "
+                    + str(round(score, 3)) + " (|" + str(round(pubk_score, 3))
+                    + " - " + str(round(block_score, 3)) + "|)")
 
                 indices = sorted(range(len(similarity_list)),
-                                 key=lambda k: similarity_list[k],
+                                 key=lambda k: similarity_list[k][0],
                                  reverse=True)
 
                 # Get peers ranked in descending order of score
                 peer_whos_turn_it_is, _ = top_peers[indices[0]]
                 if my_pubkey == peer_whos_turn_it_is:
-                    logger.debug("My turn! Putting...")
                     new_hash = mine()
 
                     # Hash an extra time to avoid same peer with lucky zeros at
                     # the end to win every time.....
                     new_hash = hasher(new_hash)
-
-                    time.sleep(5)  # Simulate some extra difficulty..
                     logger.critical("Put " + new_hash)
+                    time.sleep(5)  # Simulate some extra difficulty..
                     chain.put(new_hash)
 
                 wait_for_new_tick = True
