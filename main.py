@@ -10,12 +10,12 @@ from queue import Queue
 from pki import get_kp
 from random import randint
 
-top_level_peers = 5  # tlp
+top_level_peers = 3  # tlp
 branch_factor = 2  # bf
 
-highest_level_simulation_factor = 2  # hlsf
+highest_level_simulation_factor = 6  # hlsf
 
-nr_threads = 15
+nr_threads = 189
 
 max_randint = 10000000000
 
@@ -25,7 +25,7 @@ nonce_max_jump = 1000
 difficulty = 2
 genesis = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 genesis = genesis[:-difficulty] + "0" * difficulty
-genesis_item = {genesis: {}}
+genesis_item = {genesis: []}
 
 
 def hasher(content):
@@ -53,6 +53,18 @@ def last_block():
     return next(iter(list(chain.queue)[-1]))
 
 
+def count(list_of_items):
+    cnt = 0
+    for item in list_of_items:
+        if isinstance(item, dict):
+            for list_of_items in item.values():
+                if list_of_items:  # If list is nested further
+                    cnt += count(list_of_items)
+                else:  # If list is empty
+                    cnt += 1
+    return cnt
+
+
 def mine(content=None):
     nonce = random.randrange(max_randint)
     while True:
@@ -64,7 +76,8 @@ def mine(content=None):
 
 
 def messages(my_pubkey):
-    return list(inbox[my_pubkey].queue)
+    inbox_list = list(inbox[my_pubkey].queue)
+    return inbox_list
 
 
 def print_status(my_pubkey, score, log_type):
@@ -74,9 +87,9 @@ def print_status(my_pubkey, score, log_type):
 def mine_and_alert(my_pubkey, my_level):
     contents = messages(my_pubkey)
     new_hash = mine(contents)
-    if my_level == 0:
-        logger.info("Mined " + str(messages(my_pubkey))
-                    + " at level " + str(my_level) + " became " + str(new_hash))
+    # logger.info("Mined " + str(messages(my_pubkey)) + " at level "
+    # + str(my_level) + " became " + str(new_hash))
+
     return new_hash, contents
 
 
@@ -107,7 +120,8 @@ def verifier(i):
 
                     # Visual divider
                     if i % top_level_peers == 0:
-                        logger.info("------------------- " + str(chain.qsize()))
+                        logger.info("------------------- " + str(chain.qsize())
+                                    + ", txn: " + str(count(list(chain.queue))))
                     else:
                         time.sleep(0.5)
 
@@ -225,6 +239,8 @@ if __name__ == '__main__':
     # Geometric series = [tlp, tlp*bf, tlp*bf^2, ..... , tlp*bf^hlsf]
     level_progression = [top_level_peers * branch_factor**i for i in
                          range(highest_level_simulation_factor)]
+
+    logger.debug("Level progressions: " + str(level_progression))
 
     if sum(level_progression) < nr_threads:
         sys.exit("Too many threads (" + str(nr_threads)
