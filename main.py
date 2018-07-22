@@ -4,6 +4,8 @@ import threading
 import coloredlogs
 import logging
 import time
+import sys
+from flask import Flask, jsonify
 from queue import Queue
 from pki import get_kp
 from random import randint
@@ -11,18 +13,19 @@ from random import randint
 top_level_peers = 5  # tlp
 branch_factor = 2  # bf
 
-highest_level_simulation_factor = 5  # hlsf
+highest_level_simulation_factor = 2  # hlsf
 
-nr_threads = 30
+nr_threads = 15
 
 max_randint = 10000000000
 
-every_nth_txneer = 10
+txn_probability = 0.05
 
 nonce_max_jump = 1000
 difficulty = 2
 genesis = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 genesis = genesis[:-difficulty] + "0" * difficulty
+genesis_item = {genesis: {}}
 
 
 def hasher(content):
@@ -46,6 +49,10 @@ def similar(a, b):
     return fraction
 
 
+def last_block():
+    return next(iter(list(chain.queue)[-1]))
+
+
 def mine(content=None):
     nonce = random.randrange(max_randint)
     while True:
@@ -62,6 +69,25 @@ def messages(my_pubkey):
 
 def print_status(my_pubkey, score, log_type):
     log_type("I am " + str(my_pubkey)[:6] + ", score: " + str(round(score, 3)))
+
+
+def mine_and_alert(my_pubkey, my_level):
+    contents = messages(my_pubkey)
+    new_hash = mine(contents)
+    if my_level == 0:
+        logger.info("Mined " + str(messages(my_pubkey))
+                    + " at level " + str(my_level) + " became " + str(new_hash))
+    return new_hash, contents
+
+
+def clear_inbox(my_pubkey):
+    with inbox[my_pubkey].mutex:
+        inbox[my_pubkey].queue.clear()
+
+
+def wait_for_full_inbox(my_pubkey):
+    while len(messages(my_pubkey)) < branch_factor:
+        time.sleep(0.2)
 
 
 def verifier(i):
@@ -81,7 +107,7 @@ def verifier(i):
 
                     # Visual divider
                     if i % top_level_peers == 0:
-                        logger.info("--------------------------------")
+                        logger.info("------------------- " + str(chain.qsize()))
                     else:
                         time.sleep(0.5)
 
@@ -106,53 +132,52 @@ def verifier(i):
 
                 # TODO: Simulate failure rate in putting within 5 sec window
                 if my_pubkey == peer_whos_turn_it_is:
-                    logger.info("Gonna mine " + str(messages(my_pubkey)))
-                    new_hash = mine(messages(my_pubkey))
+                    wait_for_full_inbox(my_pubkey)
+
+                    new_hash, content = mine_and_alert(my_pubkey, my_level)
 
                     # Hash an extra time to avoid same peer with lucky zeros at
                     # the end to win every time.....
                     new_hash = hasher(new_hash)
 
+                    block = {new_hash: content}
+
                     print_status(my_pubkey, score, logger.critical)
 
                     time.sleep(5)  # Simulate some extra difficulty..
 
-                    chain.put(new_hash)
+                    chain.put(block)
                 else:
                     print_status(my_pubkey, score, logger.info)
 
-                with inbox[my_pubkey].mutex:
-                    inbox[my_pubkey].queue.clear()
+                clear_inbox(my_pubkey)
 
                 wait_for_new_tick = True
 
     else:
         # For all other levels that are not level 0
-        if my_level == 1:
-            while True:
-                if wait_for_new_tick:
-                    time.sleep(0.2)
-                    check_block = last_block()
-                    if current_block != check_block:  # Tick was put so continue
-                        wait_for_new_tick = False
-                        current_block = check_block
+        while True:
+            if random.random() < txn_probability:
 
+                peers_above_me = peers_at_level[my_level - 1]
+
+                if my_level + 2 > len(peers_at_level):
+                    peers_below_me = False
                 else:
-                    # One in every_nth_txneer chance of making a txn
-                    make_txn = \
-                        randint(0, every_nth_txneer) % every_nth_txneer == 0
+                    peers_below_me = peers_at_level[my_level + 1]
 
-                    if make_txn:
-                        my_txn = mine()
-                        peers_above_me = peers_at_level[my_level - 1]
-                        for peer_above in peers_above_me:
-                            inbox[peer_above].put(my_txn)
+                if peers_below_me:  # Checks also for empty list
+                    wait_for_full_inbox(my_pubkey)
 
-                    wait_for_new_tick = True
+                my_txn, content = mine_and_alert(my_pubkey, my_level)
 
+                item = {my_txn: content}
 
-def last_block():
-    return list(chain.queue)[-1]
+                inbox[random.choice(peers_above_me)].put(item)
+
+                clear_inbox(my_pubkey)
+
+                time.sleep(2)
 
 
 def spawn(amount, worker):
@@ -165,54 +190,74 @@ def spawn(amount, worker):
     return threads
 
 
-logger = logging.getLogger(__name__)
-coloredlogs.install(level='DEBUG', logger=logger,
-                    fmt='%(asctime)s (%(threadName)-10s) %(message)s')
+app = Flask(__name__)
 
-chain = Queue()
-chain.put(genesis)
 
-# Create simulated hierarchical list of peers, as if gotten from tempus network
-peer_dict = {}
-for peer in range(nr_threads):
-    pubkey = get_kp()[0]
+# API for inspecting state of chain/program etc via web API
+@app.route('/chain')
+def chain():
+    return jsonify(list(chain.queue))
 
-    random_score = randint(0, nr_threads)
 
-    peer_dict[pubkey] = random_score
+if __name__ == '__main__':
+    logger = logging.getLogger(__name__)
+    coloredlogs.install(level='DEBUG', logger=logger,
+                        fmt='%(asctime)s (%(threadName)-10s) %(message)s')
 
-peerdict_sorted = sorted(peer_dict, key=peer_dict.get, reverse=True)
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
 
-# Generate level progression with a geometric series using constants
-# Geometric series = [tlp, tlp*bf, tlp*bf^2, ..... , tlp*bf^hlsf]
-level_progression = [top_level_peers * branch_factor**i for i in
-                     range(highest_level_simulation_factor)]
+    chain = Queue()
+    chain.put(genesis_item)
 
-# A list of corresponding levels for each peer: [0,0, 1,1,1,1, ...... , n, n]
-levels_list = []
-counter = 0
-for level in level_progression:
-    for thread in range(level):
-        levels_list.append(counter)
-    counter = counter + 1
-levels_list = levels_list[:nr_threads]  # Chomp off at end
+    # Create simulated hierarchical list of peers, as gotten from tempus network
+    peer_dict = {}
+    for peer in range(nr_threads):
+        pubkey = get_kp()[0]
 
-# Initializing a container: list of lists containing peers at different levels
-peers_at_level = [[] for i in range(highest_level_simulation_factor)]
+        random_score = randint(0, nr_threads)
 
-# Initializing personal messaging queues for each thread
-inbox = {}
+        peer_dict[pubkey] = random_score
 
-# Initializing ranked levels list containing tuples of (peer, level)
-peer_ranked_list = []
+    peerdict_sorted = sorted(peer_dict, key=peer_dict.get, reverse=True)
 
-for idx, peer in enumerate(peerdict_sorted):
-    peer_ranked_list.append((peer, levels_list[idx]))
+    # Generate level progression with a geometric series using constants
+    # Geometric series = [tlp, tlp*bf, tlp*bf^2, ..... , tlp*bf^hlsf]
+    level_progression = [top_level_peers * branch_factor**i for i in
+                         range(highest_level_simulation_factor)]
 
-    # This is to be able to get a list of all peers at lvl X: peers_at_level[X]
-    peers_at_level[levels_list[idx]].append(peer)
+    if sum(level_progression) < nr_threads:
+        sys.exit("Too many threads (" + str(nr_threads)
+                 + ") for total in level progression. Decrease #threads to <= "
+                 + str(sum(level_progression)))
 
-    # This is to be able to reach inbox of each peer: inbox[peer].put(message)
-    inbox[peer] = Queue()
+    # A list of corresponding levels for peers: [0,0, 1,1,1,1, ...... , n, n]
+    levels_list = []
+    counter = 0
+    for level in level_progression:
+        for thread in range(level):
+            levels_list.append(counter)
+        counter = counter + 1
+    levels_list = levels_list[:nr_threads]  # Chomp off at end
 
-verifier_threads = spawn(amount=nr_threads, worker=verifier)
+    # Initializing a container: list of lists containing peers at diff levels
+    peers_at_level = [[] for i in range(highest_level_simulation_factor)]
+
+    # Initializing personal messaging queues for each thread
+    inbox = {}
+
+    # Initializing ranked levels list containing tuples of (peer, level)
+    peer_ranked_list = []
+
+    for idx, peer in enumerate(peerdict_sorted):
+        peer_ranked_list.append((peer, levels_list[idx]))
+
+        # This is to get a list of all peers at lvl X: peers_at_level[X]
+        peers_at_level[levels_list[idx]].append(peer)
+
+        # This is to reach inbox of each peer: inbox[peer].put(message)
+        inbox[peer] = Queue()
+
+    verifier_threads = spawn(amount=nr_threads, worker=verifier)
+
+    app.run(debug=False)
