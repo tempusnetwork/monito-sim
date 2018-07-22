@@ -10,17 +10,18 @@ from queue import Queue
 from pki import get_kp
 from random import randint
 
-top_level_peers = 3  # tlp
+top_level_peers = 5  # tlp
 branch_factor = 2  # bf
 
-highest_level_simulation_factor = 6  # hlsf
+highest_level_simulation_factor = 4  # hlsf
 
-nr_threads = 189
+nr_threads = 75
 
 max_randint = 10000000000
 
-txn_probability = 0.05
+txn_probability = 0.1
 
+sleeping_time = 0
 nonce_max_jump = 1000
 difficulty = 2
 genesis = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -80,6 +81,10 @@ def messages(my_pubkey):
     return inbox_list
 
 
+def total_messages():
+    return sum([queue.qsize() for queue in inbox.values()])
+
+
 def print_status(my_pubkey, score, log_type):
     log_type("I am " + str(my_pubkey)[:6] + ", score: " + str(round(score, 3)))
 
@@ -121,7 +126,8 @@ def verifier(i):
                     # Visual divider
                     if i % top_level_peers == 0:
                         logger.info("------------------- " + str(chain.qsize())
-                                    + ", txn: " + str(count(list(chain.queue))))
+                                    + ", txn: " + str(count(list(chain.queue)))
+                                    + ", waiting txn: " + str(total_messages()))
                     else:
                         time.sleep(0.5)
 
@@ -158,7 +164,7 @@ def verifier(i):
 
                     print_status(my_pubkey, score, logger.critical)
 
-                    time.sleep(5)  # Simulate some extra difficulty..
+                    time.sleep(sleeping_time)  # Simulate some extra difficulty
 
                     chain.put(block)
                 else:
@@ -176,11 +182,12 @@ def verifier(i):
                 peers_above_me = peers_at_level[my_level - 1]
 
                 if my_level + 2 > len(peers_at_level):
-                    peers_below_me = False
+                    peers_below_me = False  # In this case there is no list
                 else:
+                    # Here list exists but could be empty [] or have items
                     peers_below_me = peers_at_level[my_level + 1]
 
-                if peers_below_me:  # Checks also for empty list
+                if peers_below_me:  # Leaf node if this is either [] or False
                     wait_for_full_inbox(my_pubkey)
 
                 my_txn, content = mine_and_alert(my_pubkey, my_level)
@@ -240,8 +247,6 @@ if __name__ == '__main__':
     level_progression = [top_level_peers * branch_factor**i for i in
                          range(highest_level_simulation_factor)]
 
-    logger.debug("Level progressions: " + str(level_progression))
-
     if sum(level_progression) < nr_threads:
         sys.exit("Too many threads (" + str(nr_threads)
                  + ") for total in level progression. Decrease #threads to <= "
@@ -275,5 +280,14 @@ if __name__ == '__main__':
         inbox[peer] = Queue()
 
     verifier_threads = spawn(amount=nr_threads, worker=verifier)
+
+    info = "["
+    for idx, level in enumerate(level_progression):
+        if idx < len(peers_at_level):
+            nr_peers = len(peers_at_level[idx])
+
+            info += str(nr_peers) + "/" + str(level) + ", "
+    info += "]"
+    logger.debug("Level progressions: " + info)
 
     app.run(debug=False)
