@@ -5,6 +5,8 @@ import coloredlogs
 import logging
 import time
 import sys
+from datetime import datetime
+import pytz
 from flask import Flask, jsonify
 from queue import Queue
 from pki import get_kp
@@ -59,7 +61,8 @@ def count(list_of_items):
     for item in list_of_items:
         if isinstance(item, dict):
             for list_of_items in item.values():
-                if list_of_items:  # If list is nested further
+                # If list is nested further, and is a list
+                if list_of_items and isinstance(list_of_items, list):
                     cnt += count(list_of_items)
                 else:  # If list is empty
                     cnt += 1
@@ -96,6 +99,11 @@ def mine_and_alert(my_pubkey, my_level):
     # + str(my_level) + " became " + str(new_hash))
 
     return new_hash, contents
+
+
+# Global methods
+def utcnow():
+    return int(datetime.now(tz=pytz.utc).timestamp())
 
 
 def clear_inbox(my_pubkey):
@@ -135,11 +143,21 @@ def verifier(i):
                     current_block = check_block
 
             else:
-                # Used to use | hash(pubk) - hash(ref) |, but this gave too low
-                # randomness. so now using | hash(pubk+ref) - hash(ref) |
-                similarity_list = \
-                    [similar(hasher(peers_pubkey+current_block), current_block)
-                     for peers_pubkey in top_peers]
+
+                # Calculate similarity score to prev_hash for each top peer
+                # => Consensus mechanism to lottery determine next block forger
+                similarity_list = []
+                for peers_pubkey in top_peers:
+                    pubkhash = hasher(peers_pubkey+current_block)
+
+                    # Hash current_block extra time to avoid same peer with
+                    # lucky zeros at the end to win every time.....
+                    prevhash = hasher(current_block)
+
+                    # Used to use | hash(pubk) - hash(ref) |, but this gave too
+                    # low randomness so now using | hash(pubk+ref) - hash(ref) |
+                    similarity = similar(pubkhash, prevhash)
+                    similarity_list.append(similarity)
 
                 score = similarity_list[i]
 
@@ -156,11 +174,7 @@ def verifier(i):
 
                     new_hash, content = mine_and_alert(my_pubkey, my_level)
 
-                    # Hash an extra time to avoid same peer with lucky zeros at
-                    # the end to win every time.....
-                    new_hash = hasher(new_hash)
-
-                    block = {new_hash: content}
+                    block = {new_hash: content, "ts": utcnow()}
 
                     print_status(my_pubkey, score, logger.critical)
 
@@ -192,7 +206,7 @@ def verifier(i):
 
                 my_txn, content = mine_and_alert(my_pubkey, my_level)
 
-                item = {my_txn: content}
+                item = {my_txn: content, "ts": utcnow()}
 
                 inbox[random.choice(peers_above_me)].put(item)
 
