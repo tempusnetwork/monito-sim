@@ -12,16 +12,15 @@ from queue import Queue
 from pki import get_kp
 from random import randint
 
-top_level_peers = 5  # tlp
+top_level_peers = 10  # tlp
 branch_factor = 2  # bf
 
-nr_threads = 75
+nr_threads = 120
 
 max_randint = 10000000000
 
 txn_probability = 0.1
 
-sleeping_time = 0
 nonce_max_jump = 1000
 difficulty = 2
 genesis_hash = \
@@ -51,20 +50,26 @@ def similar(a, b):
 
 
 def last_block():
-    return list(chain.queue)[-1]["h"]
+    return list(chain.queue)[-1]
 
 
 def count(list_of_items):
-    cnt = 0
+    txn_cnt = 0
+    ts_total = 0
     for item in list_of_items:
         if isinstance(item, dict):
-            for list_of_items in item.values():
+            for key in item.keys():
                 # If list is nested further, and is a list
-                if list_of_items and isinstance(list_of_items, list):
-                    cnt += count(list_of_items)
-                else:  # If list is empty
-                    cnt += 1
-    return cnt
+                if key == "c":  # Content
+                    if item["c"]:
+                        to_add_txn_cnt, to_add_ts_total = count(item["c"])
+                        txn_cnt += to_add_txn_cnt
+                        ts_total += to_add_ts_total
+                    else:  # If list is empty
+                        txn_cnt += 1
+                        ts_total += item["ts"]
+
+    return txn_cnt, ts_total
 
 
 def mine(content=None):
@@ -118,42 +123,60 @@ def construct_block(block_hash, content, timestamp):
     return {"h": block_hash, "c": content, "ts": timestamp}
 
 
+def block_info():
+
+    latest_block = last_block()
+
+    # Listifying latest_block to aid recursion of count function
+    nr_txn_added, leaf_timestamps_sum = count([latest_block])
+
+    block_timestamp = latest_block["ts"]
+    avg_leaf_timestamp = leaf_timestamps_sum / nr_txn_added
+
+    # TODO: Also measure longest wait? Variance? Distribution?
+    avg_wait = block_timestamp - avg_leaf_timestamp
+
+    logger.info("--------------- block " + str(chain.qsize())
+                + ", added txn: " + str(nr_txn_added)
+                + ", avg wait: " + str(round(avg_wait, 3))
+                + "s, waiting txn: " + str(total_messages()))
+
+
 def verifier(i):
     my_pubkey, my_level = peer_ranked_list[i]
     wait_for_new_tick = False
 
     top_peers = peers_at_level[0]
-    current_block = last_block()
+    current_block_hash = last_block()["h"]
 
     if my_level == 0:
         while True:
             if wait_for_new_tick:
                 time.sleep(0.5)
-                check_block = last_block()
+                check_block_hash = last_block()["h"]
 
-                if current_block != check_block:  # Tick was put so continue
+                # Tick was put so continue
+                if current_block_hash != check_block_hash:
 
-                    # Visual divider
-                    if i % top_level_peers == 0:
-                        logger.info("------------------- " + str(chain.qsize())
-                                    + ", txn: " + str(count(list(chain.queue)))
-                                    + ", waiting txn: " + str(total_messages()))
+                    # Only toppest peer publishes info, rest wait
+                    if i == 0:
+                        block_info()
                     else:
                         time.sleep(0.5)
 
                     wait_for_new_tick = False
-                    current_block = check_block
+                    current_block_hash = check_block_hash
 
             else:
                 # Calculate similarity score to prev_hash for each top peer
                 # => Consensus mechanism to lottery determine next block forger
                 similarity_list = []
                 for peers_pubkey in top_peers:
-                    pubkhash = hasher(peers_pubkey+current_block)
+                    pubkhash = hasher(peers_pubkey+current_block_hash)
 
                     # Hash current_block extra time to avoid same peer with
                     # lucky zeros at the end to win every time.....
-                    prevhash = hasher(current_block)
+                    prevhash = hasher(current_block_hash)
 
                     # Used to use | hash(pubk) - hash(ref) |, but this gave too
                     # low randomness so now using | hash(pubk+ref) - hash(ref) |
@@ -178,8 +201,6 @@ def verifier(i):
                     block = construct_block(new_hash, content, utcnow())
 
                     print_status(my_pubkey, score, logger.critical)
-
-                    time.sleep(sleeping_time)  # Simulate some extra difficulty
 
                     chain.put(block)
                 else:
