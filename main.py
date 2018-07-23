@@ -15,8 +15,6 @@ from random import randint
 top_level_peers = 5  # tlp
 branch_factor = 2  # bf
 
-highest_level_simulation_factor = 4  # hlsf
-
 nr_threads = 75
 
 max_randint = 10000000000
@@ -259,6 +257,18 @@ if __name__ == '__main__':
         peer_dict[pubkey] = random_score
 
     peerdict_sorted = sorted(peer_dict, key=peer_dict.get, reverse=True)
+
+    # Calculate total amount of layers necessary based on desired nr of threads
+    highest_level_simulation_factor = 0
+    total_sum = 0
+    while total_sum < nr_threads:
+        numerator = 1 - pow(branch_factor, highest_level_simulation_factor+1)
+        denominator = 1 - branch_factor
+        total_sum = top_level_peers * numerator / denominator  # Geometric serie
+        highest_level_simulation_factor += 1
+
+    logger.info("Highest level simulation factor: "
+                + str(highest_level_simulation_factor))
 
     # Generate level progression with a geometric series using constants
     # Geometric series = [tlp, tlp*bf, tlp*bf^2, ..... , tlp*bf^hlsf]
