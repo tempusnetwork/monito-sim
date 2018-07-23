@@ -26,9 +26,9 @@ txn_probability = 0.1
 sleeping_time = 0
 nonce_max_jump = 1000
 difficulty = 2
-genesis = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-genesis = genesis[:-difficulty] + "0" * difficulty
-genesis_item = {genesis: []}
+genesis_hash = \
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+genesis_hash = genesis_hash[:-difficulty] + "0" * difficulty
 
 
 def hasher(content):
@@ -53,7 +53,7 @@ def similar(a, b):
 
 
 def last_block():
-    return next(iter(list(chain.queue)[-1]))
+    return list(chain.queue)[-1]["h"]
 
 
 def count(list_of_items):
@@ -95,8 +95,8 @@ def print_status(my_pubkey, score, log_type):
 def mine_and_alert(my_pubkey, my_level):
     contents = messages(my_pubkey)
     new_hash = mine(contents)
-    # logger.info("Mined " + str(messages(my_pubkey)) + " at level "
-    # + str(my_level) + " became " + str(new_hash))
+    #logger.info("Mined " + str(messages(my_pubkey)) + " at level "
+                #+ str(my_level) + " became " + str(new_hash))
 
     return new_hash, contents
 
@@ -116,6 +116,10 @@ def wait_for_full_inbox(my_pubkey):
         time.sleep(0.2)
 
 
+def construct_block(block_hash, content, timestamp):
+    return {"h": block_hash, "c": content, "ts": timestamp}
+
+
 def verifier(i):
     my_pubkey, my_level = peer_ranked_list[i]
     wait_for_new_tick = False
@@ -126,7 +130,7 @@ def verifier(i):
     if my_level == 0:
         while True:
             if wait_for_new_tick:
-                time.sleep(0.2)
+                time.sleep(0.5)
                 check_block = last_block()
 
                 if current_block != check_block:  # Tick was put so continue
@@ -143,7 +147,6 @@ def verifier(i):
                     current_block = check_block
 
             else:
-
                 # Calculate similarity score to prev_hash for each top peer
                 # => Consensus mechanism to lottery determine next block forger
                 similarity_list = []
@@ -174,7 +177,7 @@ def verifier(i):
 
                     new_hash, content = mine_and_alert(my_pubkey, my_level)
 
-                    block = {new_hash: content, "ts": utcnow()}
+                    block = construct_block(new_hash, content, utcnow())
 
                     print_status(my_pubkey, score, logger.critical)
 
@@ -204,11 +207,11 @@ def verifier(i):
                 if peers_below_me:  # Leaf node if this is either [] or False
                     wait_for_full_inbox(my_pubkey)
 
-                my_txn, content = mine_and_alert(my_pubkey, my_level)
+                new_hash, content = mine_and_alert(my_pubkey, my_level)
 
-                item = {my_txn: content, "ts": utcnow()}
+                block = construct_block(new_hash, content, utcnow())
 
-                inbox[random.choice(peers_above_me)].put(item)
+                inbox[random.choice(peers_above_me)].put(block)
 
                 clear_inbox(my_pubkey)
 
@@ -243,7 +246,8 @@ if __name__ == '__main__':
     log.setLevel(logging.ERROR)
 
     chain = Queue()
-    chain.put(genesis_item)
+    genesis_block = construct_block(genesis_hash, [], utcnow())
+    chain.put(genesis_block)
 
     # Create simulated hierarchical list of peers, as gotten from tempus network
     peer_dict = {}
