@@ -4,7 +4,6 @@ import threading
 import coloredlogs
 import logging
 import time
-import sys
 from datetime import datetime
 import pytz
 from flask import Flask, jsonify
@@ -12,14 +11,16 @@ from queue import Queue
 from pki import get_kp
 from random import randint
 
-top_level_peers = 10  # tlp
+top_level_peers = 5  # tlp
 branch_factor = 2  # bf
 
 nr_threads = 120
 
 max_randint = 10000000000
 
-txn_probability = 0.1
+txn_probability = 0.05
+
+artificial_network_latency = 2
 
 nonce_max_jump = 1000
 difficulty = 2
@@ -53,6 +54,7 @@ def last_block():
     return list(chain.queue)[-1]
 
 
+# Counts various statistics about blocks
 def count(list_of_items):
     txn_cnt = 0
     ts_total = 0
@@ -87,7 +89,7 @@ def messages(my_pubkey):
     return inbox_list
 
 
-def total_messages():
+def total_waiting_messages():
     return sum([queue.qsize() for queue in inbox.values()])
 
 
@@ -95,16 +97,6 @@ def print_status(my_pubkey, score, log_type):
     log_type("I am " + str(my_pubkey)[:6] + ", score: " + str(round(score, 3)))
 
 
-def mine_and_alert(my_pubkey, my_level):
-    contents = messages(my_pubkey)
-    new_hash = mine(contents)
-    #logger.info("Mined " + str(messages(my_pubkey)) + " at level "
-                #+ str(my_level) + " became " + str(new_hash))
-
-    return new_hash, contents
-
-
-# Global methods
 def utcnow():
     return int(datetime.now(tz=pytz.utc).timestamp())
 
@@ -123,8 +115,25 @@ def construct_block(block_hash, content, timestamp):
     return {"h": block_hash, "c": content, "ts": timestamp}
 
 
-def block_info():
+# Calculate similarity score to prev_hash for each top peer
+# => Consensus mechanism to determine next block forger via lottery
+def get_sim_dict(top_peers, current_block_hash):
+    similarity_dict = {}
+    for peers_pubkey in top_peers:
+        pubkhash = hasher(peers_pubkey + current_block_hash)
 
+        # Hash current_block extra time to avoid same peer with
+        # lucky zeros at the end to win every time.....
+        prevhash = hasher(current_block_hash)
+
+        # Used to use | hash(pubk) - hash(ref) |, but this gave too
+        # low randomness so now using | hash(pubk+ref) - hash(ref) |
+        similarity = similar(pubkhash, prevhash)
+        similarity_dict[peers_pubkey] = similarity
+    return similarity_dict
+
+
+def block_info():
     latest_block = last_block()
 
     # Listifying latest_block to aid recursion of count function
@@ -139,102 +148,115 @@ def block_info():
     logger.info("--------------- block " + str(chain.qsize())
                 + ", added txn: " + str(nr_txn_added)
                 + ", avg wait: " + str(round(avg_wait, 3))
-                + "s, waiting txn: " + str(total_messages()))
+                + "s, waiting txn: " + str(total_waiting_messages()))
+
+
+def handle_top_level(my_pubkey):
+    wait_for_new_tick = False
+    current_block_hash = last_block()["h"]
+    peer_whos_turn_it_is = ""
+
+    while True:
+        make_txn_with_probability(0)  # Make txn at level 0
+
+        if wait_for_new_tick:
+            time.sleep(0.5)
+            check_block_hash = last_block()["h"]
+
+            # Tick was put so continue
+            if current_block_hash != check_block_hash:
+
+                # Only toppest peer publishes info, rest wait
+                if my_pubkey == peer_whos_turn_it_is:
+                    block_info()
+                else:
+                    time.sleep(0.5)
+
+                wait_for_new_tick = False
+                current_block_hash = check_block_hash
+
+        else:
+            top_peers = peers_at_level[0]
+            similarity_dict = get_sim_dict(top_peers, current_block_hash)
+
+            my_score = similarity_dict[my_pubkey]
+
+            sorted_peers = [(k, similarity_dict[k]) for k in
+                            sorted(similarity_dict, key=similarity_dict.get,
+                                   reverse=True)]
+
+            # Get peers ranked in descending order of score
+            peer_whos_turn_it_is, _ = sorted_peers[0]
+
+            # TODO: Simulate failure rate in putting within 5 sec window
+            if my_pubkey == peer_whos_turn_it_is:
+                wait_for_full_inbox(my_pubkey)
+
+                content = messages(my_pubkey)
+
+                new_hash = mine(content)
+
+                block = construct_block(new_hash, content, utcnow())
+
+                print_status(my_pubkey, my_score, logger.critical)
+
+                chain.put(block)
+            else:
+                print_status(my_pubkey, my_score, logger.info)
+
+            clear_inbox(my_pubkey)
+
+            wait_for_new_tick = True
+
+
+def handle_other_levels(my_pubkey, my_level):
+    # For all other levels that are not level 0
+    while True:
+        make_txn_with_probability(my_level)
+
+        peers_above_me = peers_at_level[my_level - 1]
+
+        if my_level + 2 > len(peers_at_level):  # Here we are at the bottom
+            peers_below_me = False
+        else:
+            # Here list exists but could be empty [] or have items
+            peers_below_me = peers_at_level[my_level + 1]
+
+        if peers_below_me:  # Leaf node if this is either [] or False
+            wait_for_full_inbox(my_pubkey)
+
+        content = messages(my_pubkey)
+
+        new_hash = mine(content)
+
+        # If you're a leaf node, this becomes a transaction (content is [])
+        block = construct_block(new_hash, content, utcnow())
+
+        inbox[random.choice(peers_above_me)].put(block)
+
+        clear_inbox(my_pubkey)
+
+        time.sleep(artificial_network_latency)  # Simulate network latency
+
+
+# TODO: This adds a lot of variance to nr_added_txn! Only allow max 1 txn per V?
+def make_txn_with_probability(my_level):
+    if random.random() < txn_probability:
+        new_hash = mine()
+        txn = construct_block(new_hash, [], utcnow())
+
+        # Assuming if we want to make a txn we send it to a peer / ourselves?
+        my_level_peers = peers_at_level[my_level]
+        inbox[random.choice(my_level_peers)].put(txn)
 
 
 def verifier(i):
     my_pubkey, my_level = peer_ranked_list[i]
-    wait_for_new_tick = False
-
-    top_peers = peers_at_level[0]
-    current_block_hash = last_block()["h"]
 
     if my_level == 0:
-        while True:
-            if wait_for_new_tick:
-                time.sleep(0.5)
-                check_block_hash = last_block()["h"]
-
-                # Tick was put so continue
-                if current_block_hash != check_block_hash:
-
-                    # Only toppest peer publishes info, rest wait
-                    if i == 0:
-                        block_info()
-                    else:
-                        time.sleep(0.5)
-
-                    wait_for_new_tick = False
-                    current_block_hash = check_block_hash
-
-            else:
-                # Calculate similarity score to prev_hash for each top peer
-                # => Consensus mechanism to lottery determine next block forger
-                similarity_list = []
-                for peers_pubkey in top_peers:
-                    pubkhash = hasher(peers_pubkey+current_block_hash)
-
-                    # Hash current_block extra time to avoid same peer with
-                    # lucky zeros at the end to win every time.....
-                    prevhash = hasher(current_block_hash)
-
-                    # Used to use | hash(pubk) - hash(ref) |, but this gave too
-                    # low randomness so now using | hash(pubk+ref) - hash(ref) |
-                    similarity = similar(pubkhash, prevhash)
-                    similarity_list.append(similarity)
-
-                score = similarity_list[i]
-
-                indices = sorted(range(len(similarity_list)),
-                                 key=lambda k: similarity_list[k],
-                                 reverse=True)
-
-                # Get peers ranked in descending order of score
-                peer_whos_turn_it_is = top_peers[indices[0]]
-
-                # TODO: Simulate failure rate in putting within 5 sec window
-                if my_pubkey == peer_whos_turn_it_is:
-                    wait_for_full_inbox(my_pubkey)
-
-                    new_hash, content = mine_and_alert(my_pubkey, my_level)
-
-                    block = construct_block(new_hash, content, utcnow())
-
-                    print_status(my_pubkey, score, logger.critical)
-
-                    chain.put(block)
-                else:
-                    print_status(my_pubkey, score, logger.info)
-
-                clear_inbox(my_pubkey)
-
-                wait_for_new_tick = True
-
+        handle_top_level(my_pubkey)
     else:
-        # For all other levels that are not level 0
-        while True:
-            if random.random() < txn_probability:
-
-                peers_above_me = peers_at_level[my_level - 1]
-
-                if my_level + 2 > len(peers_at_level):
-                    peers_below_me = False  # In this case there is no list
-                else:
-                    # Here list exists but could be empty [] or have items
-                    peers_below_me = peers_at_level[my_level + 1]
-
-                if peers_below_me:  # Leaf node if this is either [] or False
-                    wait_for_full_inbox(my_pubkey)
-
-                new_hash, content = mine_and_alert(my_pubkey, my_level)
-
-                block = construct_block(new_hash, content, utcnow())
-
-                inbox[random.choice(peers_above_me)].put(block)
-
-                clear_inbox(my_pubkey)
-
-                time.sleep(2)
+        handle_other_levels(my_pubkey, my_level)
 
 
 def spawn(amount, worker):
@@ -280,6 +302,7 @@ if __name__ == '__main__':
     peerdict_sorted = sorted(peer_dict, key=peer_dict.get, reverse=True)
 
     # Calculate total amount of layers necessary based on desired nr of threads
+    # Done by calculating a geometric series and using the formula for its sum
     highest_level_simulation_factor = 0
     total_sum = 0
     while total_sum < nr_threads:
@@ -296,11 +319,6 @@ if __name__ == '__main__':
     level_progression = [top_level_peers * branch_factor**i for i in
                          range(highest_level_simulation_factor)]
 
-    if sum(level_progression) < nr_threads:
-        sys.exit("Too many threads (" + str(nr_threads)
-                 + ") for total in level progression. Decrease #threads to <= "
-                 + str(sum(level_progression)))
-
     # A list of corresponding levels for peers: [0,0, 1,1,1,1, ...... , n, n]
     levels_list = []
     counter = 0
@@ -313,7 +331,7 @@ if __name__ == '__main__':
     # Initializing a container: list of lists containing peers at diff levels
     peers_at_level = [[] for i in range(highest_level_simulation_factor)]
 
-    # Initializing personal messaging queues for each thread
+    # Initializing personal messaging queues ("inboxes") for each thread
     inbox = {}
 
     # Initializing ranked levels list containing tuples of (peer, level)
