@@ -14,7 +14,7 @@ from random import randint
 top_level_peers = 5  # tlp
 branch_factor = 2  # bf
 
-nr_threads = 120
+nr_threads = 30
 
 max_randint = 10000000000
 
@@ -184,6 +184,9 @@ def handle_top_level(my_pubkey):
             sorted_peers = [(k, similarity_dict[k]) for k in
                             sorted(similarity_dict, key=similarity_dict.get,
                                    reverse=True)]
+
+            # values = [item for item in similarity_dict.values()]
+            # indices = sorted(range(len(values)), key=values.__getitem__)
 
             # Get peers ranked in descending order of score
             peer_whos_turn_it_is, _ = sorted_peers[0]
